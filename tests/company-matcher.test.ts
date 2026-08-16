@@ -82,7 +82,11 @@ async function run(): Promise<void> {
   });
   const taxDecision = linker.link(exactTaxSource, exactTaxCandidate);
   assert.equal(taxDecision.type, "confirmed");
-  assert.equal(taxDecision.score, 120);
+  assert.ok(taxDecision.score >= 120);
+  assert.equal(
+    taxDecision.contributions.find((entry) => entry.strategy === "tax_id")?.points,
+    120
+  );
 
   const matcher = new MatchCompanies(
     blocking,
