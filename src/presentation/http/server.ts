@@ -28,8 +28,10 @@ const matchRequestsTotal = new client.Counter({
 register.registerMetric(matchesTotal);
 register.registerMetric(matchRequestsTotal);
 
-const blockingKeyFactory = new PrefixCountryBlockingKeyFactory(3);
-const strategies = [new TaxIdStrategy(100), new DomainStrategy(60), new LevenshteinNameStrategy(40)];
+// A two-character country/name prefix keeps blocking cheap while still allowing
+// small spelling mistakes such as "Aple" vs "Apple" to reach the scorer.
+const blockingKeyFactory = new PrefixCountryBlockingKeyFactory(2);
+const strategies = [new TaxIdStrategy(), new DomainStrategy(), new LevenshteinNameStrategy()];
 const identityLinker = new CompanyIdentityLinker(strategies);
 const goldenRecordFactory = new GoldenRecordFactory();
 
@@ -50,8 +52,18 @@ app.get("/metrics", async (_req: Request, res: Response) => {
 app.post("/match", async (req: Request, res: Response) => {
   matchRequestsTotal.inc();
 
-  const sourceDtos: CompanyDto[] = req.body?.sourceCompanies ?? [];
-  const candidateDtos: CompanyDto[] = req.body?.candidateCompanies ?? [];
+  if (!Array.isArray(req.body?.sourceCompanies) || !Array.isArray(req.body?.candidateCompanies)) {
+    res.status(400).json({
+      error: {
+        type: "InvalidRequest",
+        message: "sourceCompanies and candidateCompanies must both be arrays"
+      }
+    });
+    return;
+  }
+
+  const sourceDtos = req.body.sourceCompanies as CompanyDto[];
+  const candidateDtos = req.body.candidateCompanies as CompanyDto[];
 
   const sourceMapped = mapCompanies(sourceDtos);
   if (sourceMapped.kind === "err") {

@@ -20,6 +20,19 @@ export type CompanyValidationError = {
   readonly field?: keyof CompanyProps;
 };
 
+const LEGAL_NAME_SUFFIXES = new Set([
+  "co",
+  "company",
+  "corp",
+  "corporation",
+  "inc",
+  "incorporated",
+  "limited",
+  "llc",
+  "ltd",
+  "plc"
+]);
+
 export class Company {
   private constructor(private readonly props: CompanyProps) {}
 
@@ -50,6 +63,7 @@ export class Company {
 
     return Result.ok(new Company({
       ...props,
+      id: props.id.trim(),
       name: props.name.trim(),
       country: props.country.trim()
     }));
@@ -92,7 +106,7 @@ export class Company {
   }
 
   public normalizedName(): string {
-    return normalizeText(this.name);
+    return normalizeCompanyName(this.name);
   }
 
   public normalizedDomain(): string | undefined {
@@ -102,7 +116,8 @@ export class Company {
 
   public normalizedTaxId(): string | undefined {
     if (!this.taxId?.trim()) return undefined;
-    return this.taxId.replace(/\s+/g, "").toUpperCase();
+    const normalized = this.taxId.replace(/[^a-z0-9]/gi, "").toUpperCase();
+    return normalized || undefined;
   }
 }
 
@@ -115,9 +130,21 @@ export function normalizeText(value: string): string {
     .trim();
 }
 
+export function normalizeCompanyName(value: string): string {
+  const tokens = normalizeText(value).split(" ").filter(Boolean);
+
+  while (tokens.length > 1 && LEGAL_NAME_SUFFIXES.has(tokens[tokens.length - 1] ?? "")) {
+    tokens.pop();
+  }
+
+  return tokens.join(" ");
+}
+
 export function normalizeDomain(domain: string): string {
   const cleaned = domain.trim().toLowerCase();
   const noProto = cleaned.replace(/^https?:\/\//, "");
-  const host = noProto.split("/")[0] ?? noProto;
-  return host.replace(/^www\./, "");
+  const hostWithAuth = noProto.split("/")[0] ?? noProto;
+  const host = hostWithAuth.split("@").pop() ?? hostWithAuth;
+  const withoutPort = host.replace(/:\d+$/, "");
+  return withoutPort.replace(/^www\./, "").replace(/\.$/, "");
 }

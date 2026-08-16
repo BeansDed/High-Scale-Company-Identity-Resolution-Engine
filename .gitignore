@@ -1,4 +1,12 @@
-node_modules
-.dist
-/dist
+node_modules/
+dist/
+coverage/
+
 .env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+.vscode/
+.idea/

@@ -1,130 +1,222 @@
-# High-Scale Company Identity Resolution Engine (Company Matcher)
+# High-Scale Company Identity Resolution Engine
 
-A Clean Architecture TypeScript service that links duplicate company records across two datasets, even with missing fields and misspellings.
+A TypeScript service for linking duplicate company records across noisy datasets while keeping the matching rules isolated from HTTP, storage, and infrastructure concerns.
 
-## File tree
+The project is built around **Clean Architecture**, deterministic blocking, weighted matching strategies, golden-record creation, Docker, and Prometheus metrics.
 
-```
-.
-├── Dockerfile
-├── docker-compose.yml
-├── package.json
-├── prometheus.yml
-├── tsconfig.json
-└── src
-    ├── application
-    │   ├── ports
-    │   │   ├── BlockingKeyFactory.ts
-    │   │   └── SemanticCompanySearch.ts
-    │   └── usecases
-    │       └── MatchCompanies.ts
-    ├── domain
-    │   ├── company
-    │   │   └── Company.ts
-    │   ├── matching
-    │   │   ├── CompanyIdentityLinker.ts
-    │   │   ├── ConfidenceThreshold.ts
-    │   │   ├── MatchDecision.ts
-    │   │   └── MatchingStrategy.ts
-    │   ├── record
-    │   │   └── GoldenRecord.ts
-    │   └── result
-    │       └── Result.ts
-    ├── infrastructure
-    │   ├── blocking
-    │   │   └── PrefixCountryBlockingKeyFactory.ts
-    │   └── matching
-    │       ├── DomainStrategy.ts
-    │       ├── LevenshteinNameStrategy.ts
-    │       └── TaxIdStrategy.ts
-    └── presentation
-        └── http
-            ├── dto.ts
-            └── server.ts
+## What It Demonstrates
+
+- Clean separation between domain, application, infrastructure, and HTTP layers
+- Candidate blocking to avoid full `N × M` comparisons
+- Deterministic company-name, domain, and tax-ID normalization
+- Weighted matching strategies that can be replaced independently
+- Golden-record generation after a confirmed match
+- Prometheus observability
+- Reproducible Docker builds
+- Automated build and matcher checks
+
+## Matching Pipeline
+
+### 1. Normalize identity fields
+
+Before scoring, the service normalizes the fields that commonly vary between datasets:
+
+- company names are lowercased, punctuation-normalized, and common legal suffixes such as `Inc`, `LLC`, `Ltd`, and `Corporation` are removed
+- domains are normalized by removing protocol, `www`, common ports, paths, and trailing dots
+- tax IDs are compared without punctuation, spaces, or casing differences
+
+For example:
+
+```text
+Aple Inc            -> aple
+Apple Incorporated  -> apple
+https://www.apple.com:443/about -> apple.com
+12-345 6789         -> 123456789
 ```
 
-## Architecture (Clean Architecture)
+### 2. Block candidates
 
-- **Domain**: business language and decisions (`Company`, `CompanyIdentityLinker`, `MatchDecision`, `GoldenRecord`).
-- **Application**: use cases + ports (`MatchCompanies`, `BlockingKeyFactory`, `SemanticCompanySearch`).
-- **Infrastructure**: concrete strategies + blocking implementations (`LevenshteinNameStrategy`, `TaxIdStrategy`, `PrefixCountryBlockingKeyFactory`).
-- **Presentation**: HTTP adapter (`POST /match`, `GET /metrics`).
+The default blocking key is:
 
-This keeps matching logic independent of Express/DB/Redis/vector DB. Replacing Levenshtein with an embedding-based matcher later is a matter of swapping an adapter.
-
-## Matching pipeline
-
-1. **Blocking**: we compute a `blocking_key` (default: `COUNTRY:first3letters(normalizedName)`) so we only compare within the same block.
-2. **Strategy scoring (Strategy Pattern)**:
-   - `TaxIdStrategy` weight **100** (exact match)
-   - `DomainStrategy` weight **60** (exact match on normalized domain)
-   - `LevenshteinNameStrategy` weight **40** (edit-distance similarity)
-3. **Decision**: scores are summed; if `score >= 120` we confirm the match.
-4. **Golden Record**: on confirmed match, we merge the best available fields from both.
-
-## Big-O complexity (why it scales)
-
-Let:
-- `N` = number of source records
-- `M` = number of candidate records
-- `B` = number of blocks
-- `k` = average candidates per block (`k ≈ M / B`)
-
-### Naive approach
-- Comparing everything to everything is `O(N * M)` (often described as `O(n^2)` when `N ≈ M`).
-
-### With blocking
-- Build candidate block index: `O(M)`
-- For each source record, compare only within its block: `O(N * k)`
-- Total: `O(M + N * k)`
-
-If blocking is effective, `k` stays small even when `M` is very large.
-
-## Scaling to 1 million records
-
-- **Tune blocking to reduce k**
-  - Use multiple blocking keys per company (e.g., phonetic key, 3-gram signatures, country + city).
-  - Maintain multiple indices and union candidates (still far less than all-pairs).
-- **Two-stage retrieval**
-  - Stage 1: blocking (cheap, deterministic)
-  - Stage 2: semantic/vector search (optional port `SemanticCompanySearch`) to get top-K candidates when deterministic keys are missing.
-- **Horizontal partitioning**
-  - Partition work by blocking key prefix (`US:app`, `SG:goo`, etc.) across workers.
-- **Caching**
-  - Cache normalized forms and prior comparisons in Redis.
-- **Vector DB integration**
-  - Implement `SemanticCompanySearch` using Pinecone/Milvus.
-  - Persist embeddings keyed by company id; query topK neighbors to avoid broad scans.
-- **Observability**
-  - Prometheus metrics at `/metrics`.
-  - Use `rate(company_matches_confirmed_total[1m])` as “matches per second”.
-
-## Running
-
-### Local (Node)
-
-```bash
-npm install
-npm run dev
+```text
+COUNTRY:first2letters(normalizedName)
 ```
 
-### Docker Compose (App + Postgres + Redis + Prometheus)
+That means both `Aple Inc` and `Apple Incorporated` land in `US:ap`, so a small spelling error does not prevent the records from reaching the scorer.
 
-```bash
-docker compose up --build
+Blocking keeps the common path closer to:
+
+```text
+O(M + N × k)
 ```
 
-- App: `http://localhost:8080`
-- Metrics: `http://localhost:8080/metrics`
-- Prometheus: `http://localhost:9090`
+where `k` is the average number of candidates inside a block, instead of comparing every source record to every candidate.
 
-## Example request
+### 3. Score evidence
+
+| Strategy | Maximum points | Meaning |
+|---|---:|---|
+| Exact normalized tax ID | 120 | Decisive identity evidence |
+| Exact normalized domain | 100 | Strong identity evidence |
+| Levenshtein name similarity | 40 | Supporting fuzzy-name evidence |
+
+A match is confirmed when the total score reaches **120**.
+
+This lets a normalized tax-ID match confirm directly, while an exact domain can combine with a strong fuzzy-name match.
+
+### 4. Create a golden record
+
+Confirmed records are merged into a golden record that preserves the source and matched IDs while selecting the best available values from both records.
+
+## Example
 
 `POST /match`
 
 ```json
 {
-  "sourceCompanies": [{"id":"a1","name":"Aple Inc","country":"US","domain":"apple.com"}],
-  "candidateCompanies": [{"id":"b9","name":"Apple Incorporated","country":"US","domain":"www.apple.com"}]
+  "sourceCompanies": [
+    {
+      "id": "a1",
+      "name": "Aple Inc",
+      "country": "US",
+      "domain": "https://apple.com"
+    }
+  ],
+  "candidateCompanies": [
+    {
+      "id": "b9",
+      "name": "Apple Incorporated",
+      "country": "US",
+      "domain": "www.apple.com"
+    }
+  ]
 }
 ```
+
+The two records share the same blocking key, the domain contributes strong evidence, and the fuzzy company-name score pushes the result over the confirmation threshold.
+
+## API
+
+### `GET /health`
+
+Returns a lightweight liveness response.
+
+```json
+{ "ok": true }
+```
+
+### `GET /metrics`
+
+Returns Prometheus-formatted application and Node.js metrics.
+
+Custom counters include:
+
+- `company_match_requests_total`
+- `company_matches_confirmed_total`
+
+### `POST /match`
+
+Accepts `sourceCompanies` and `candidateCompanies` arrays. Invalid payload shapes or invalid company fields return HTTP `400` responses.
+
+## Project Structure
+
+```text
+src/
+├── application/
+│   ├── ports/
+│   │   ├── BlockingKeyFactory.ts
+│   │   └── SemanticCompanySearch.ts
+│   └── usecases/
+│       └── MatchCompanies.ts
+├── domain/
+│   ├── company/
+│   │   └── Company.ts
+│   ├── matching/
+│   │   ├── CompanyIdentityLinker.ts
+│   │   ├── ConfidenceThreshold.ts
+│   │   ├── MatchDecision.ts
+│   │   └── MatchingStrategy.ts
+│   ├── record/
+│   │   └── GoldenRecord.ts
+│   └── result/
+│       └── Result.ts
+├── infrastructure/
+│   ├── blocking/
+│   │   └── PrefixCountryBlockingKeyFactory.ts
+│   └── matching/
+│       ├── DomainStrategy.ts
+│       ├── LevenshteinNameStrategy.ts
+│       └── TaxIdStrategy.ts
+└── presentation/
+    └── http/
+        ├── dto.ts
+        └── server.ts
+```
+
+## Run Locally
+
+Requirements:
+
+- Node.js 20+
+- npm
+
+```bash
+npm ci
+npm run check
+npm run dev
+```
+
+The API starts on:
+
+```text
+http://localhost:8080
+```
+
+## Verification
+
+Run the complete local verification command:
+
+```bash
+npm run check
+```
+
+That command:
+
+1. compiles the TypeScript project with strict settings
+2. runs matcher checks covering normalization, typo-tolerant blocking, tax-ID matching, fuzzy/domain matching, golden-record creation, and invalid requests
+
+A GitHub Actions workflow also runs the same verification on pushes and pull requests to `main` when Actions are available for the account.
+
+## Docker + Prometheus
+
+Start the API and Prometheus together:
+
+```bash
+docker compose up --build
+```
+
+Services:
+
+- API: `http://localhost:8080`
+- Prometheus: `http://localhost:9090`
+
+The container build uses `npm ci`, separates build and production dependencies, runs as the non-root Node user, and includes a `/health` container health check.
+
+## Current Scope
+
+The current matcher is intentionally **in-memory**. PostgreSQL and Redis are not presented as implemented persistence layers in this version.
+
+The architecture already exposes ports and boundaries where production-scale infrastructure can be introduced without moving matching rules into Express or a database adapter.
+
+## Scaling Path
+
+For substantially larger datasets, the next steps would be:
+
+- use multiple blocking keys such as phonetic signatures, country/city combinations, or n-gram keys
+- partition blocks across workers
+- persist normalized records and blocking indexes
+- cache repeated normalization/comparison work
+- implement the existing `SemanticCompanySearch` port with a vector-search adapter for records that cannot be blocked deterministically
+- measure block size, comparisons per request, latency, and confirmed-match rate through Prometheus
+
+The goal is to keep scaling concerns in adapters and orchestration while preserving domain matching rules as independently testable code.

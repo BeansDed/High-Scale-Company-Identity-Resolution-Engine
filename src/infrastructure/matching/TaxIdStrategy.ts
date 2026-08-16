@@ -4,7 +4,7 @@ import type { MatchingStrategy, SimilarityContribution } from "../../domain/matc
 export class TaxIdStrategy implements MatchingStrategy {
   public readonly name = "tax_id";
 
-  constructor(private readonly weight: number = 100) {}
+  constructor(private readonly weight: number = 120) {}
 
   public calculateSimilarity(source: Company, candidate: Company): SimilarityContribution {
     const a = source.normalizedTaxId();
