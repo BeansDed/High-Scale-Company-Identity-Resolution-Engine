@@ -12,6 +12,7 @@ import { PrefixCountryBlockingKeyFactory } from "../src/infrastructure/blocking/
 import { DomainStrategy } from "../src/infrastructure/matching/DomainStrategy";
 import { LevenshteinNameStrategy } from "../src/infrastructure/matching/LevenshteinNameStrategy";
 import { TaxIdStrategy } from "../src/infrastructure/matching/TaxIdStrategy";
+import { mapCompanies } from "../src/presentation/http/dto";
 
 function makeCompany(props: CompanyProps): Company {
   const result = Company.create(props);
@@ -25,6 +26,12 @@ async function run(): Promise<void> {
   assert.equal(normalizeCompanyName("Apple Incorporated"), "apple");
   assert.equal(normalizeCompanyName("Example Company LLC"), "example");
   assert.equal(normalizeDomain("HTTPS://www.Apple.com:443/about"), "apple.com");
+
+  const malformedDtos = mapCompanies([null, "not-an-object"]);
+  assert.equal(malformedDtos.kind, "err");
+  if (malformedDtos.kind === "err") {
+    assert.equal(malformedDtos.error.length, 2);
+  }
 
   const formattedTaxId = makeCompany({
     id: "tax-format",
