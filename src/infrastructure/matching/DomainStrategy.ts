@@ -4,7 +4,7 @@ import type { MatchingStrategy, SimilarityContribution } from "../../domain/matc
 export class DomainStrategy implements MatchingStrategy {
   public readonly name = "domain";
 
-  constructor(private readonly weight: number = 60) {}
+  constructor(private readonly weight: number = 100) {}
 
   public calculateSimilarity(source: Company, candidate: Company): SimilarityContribution {
     const a = source.normalizedDomain();
