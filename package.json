@@ -2,9 +2,14 @@
   "name": "high-scale-company-identity-resolution-engine",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/presentation/http/server.ts",
     "build": "tsc -p tsconfig.json",
+    "test": "tsx tests/company-matcher.test.ts",
+    "check": "npm run build && npm test",
     "start": "node dist/presentation/http/server.js"
   },
   "dependencies": {
